@@ -3,6 +3,7 @@ import hashlib
 import requests
 import re
 import time
+import xml.etree.ElementTree as ET
 from flask import Flask, request, make_response
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
@@ -24,7 +25,7 @@ FETCH_HEADERS = {
     "Referer": "https://t.yiqicai.com/"
 }
 
-# ========== 微信验证 ==========
+# ========== 微信验证 + 消息处理 ==========
 @app.route("/wx", methods=["GET", "POST"])
 def wx_entry():
     if request.method == "GET":
@@ -37,7 +38,37 @@ def wx_entry():
         if sha1 == signature:
             return echostr
         return "验证失败", 403
+
+    # POST - 处理粉丝消息
+    try:
+        xml_data = ET.fromstring(request.data)
+        msg_type = xml_data.find("MsgType").text
+        from_user = xml_data.find("FromUserName").text
+        to_user = xml_data.find("ToUserName").text
+
+        if msg_type == "text":
+            data = fetch_lottery()
+            reply = format_message(data)
+            reply += "\n\n回复任意内容可再次查询"
+            return make_xml_reply(from_user, to_user, reply)
+        elif msg_type in ("event",):
+            event = xml_data.find("Event").text
+            if event in ("subscribe", "CLICK"):
+                data = fetch_lottery()
+                reply = "欢迎关注！\n\n" + format_message(data)
+                return make_xml_reply(from_user, to_user, reply)
+    except Exception as e:
+        print("消息处理失败: {}".format(e))
     return "ok"
+
+def make_xml_reply(to_user, from_user, content):
+    return """<xml>
+<ToUserName><![CDATA[{to}]]></ToUserName>
+<FromUserName><![CDATA[{frm}]]></FromUserName>
+<CreateTime>{t}</CreateTime>
+<MsgType><![CDATA[text]]></MsgType>
+<Content><![CDATA[{content}]]></Content>
+</xml>""".format(to=to_user, frm=from_user, t=int(time.time()), content=content)
 
 # ========== 获取 access_token ==========
 _token_cache = {"token": "", "expire": 0}
@@ -52,7 +83,6 @@ def get_access_token():
         if "access_token" in data:
             _token_cache["token"] = data["access_token"]
             _token_cache["expire"] = time.time() + data["expires_in"] - 300
-            print("access_token 获取成功")
             return _token_cache["token"]
         else:
             print("获取token失败: {}".format(data))
@@ -101,11 +131,8 @@ def parse_nuxt_vars(raw):
     return var_map
 
 def resolve(val, var_map):
-    """解析字段值：如果是字符串直接返回，否则从变量映射查找"""
     val = val.strip()
-    if val.startswith('"') and val.endswith('"'):
-        return val[1:-1]
-    if val.startswith("'") and val.endswith("'"):
+    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
         return val[1:-1]
     return var_map.get(val, "")
 
@@ -118,8 +145,6 @@ def fetch_lottery():
         r = requests.get("https://t.yiqicai.com/home/nation", headers=FETCH_HEADERS, timeout=15)
         raw = r.text
         var_map = parse_nuxt_vars(raw)
-
-        # 找所有彩种位置
         positions = [(m.start(), m.group(1)) for m in re.finditer(r'lotteryName:"([^"]+)"', raw)]
         seen = set()
 
@@ -130,35 +155,25 @@ def fetch_lottery():
             end = positions[i+1][0] if i+1 < len(positions) else pos+1000
             block = raw[pos:end]
 
-            def get_str(field):
-                m = re.search(r'{}:"([^"]*)"'.format(field), block)
+            def get_str(field, b=block):
+                m = re.search(r'{}:"([^"]*)"'.format(field), b)
                 return m.group(1) if m else ""
 
-            def get_val(field):
-                m = re.search(r'{}:([^,}}]+)'.format(field), block)
-                if not m:
-                    return ""
-                return resolve(m.group(1), var_map)
-
-            issue_no   = get_val("issueNo")
-            issue_day  = get_val("issueDay")
-            issue_week = get_val("issueWeek")
-            area1      = get_str("resultArea1")
-            area2      = get_str("resultArea2")
+            def get_val(field, b=block):
+                m = re.search(r'{}:([^,}}]+)'.format(field), b)
+                return resolve(m.group(1), var_map) if m else ""
 
             results.append({
                 "name": name,
-                "issue": issue_no,
-                "date": "{} {}".format(issue_day, issue_week).strip(),
-                "area1": area1,
-                "area2": area2
+                "issue": get_val("issueNo"),
+                "date": "{} {}".format(get_val("issueDay"), get_val("issueWeek")).strip(),
+                "area1": get_str("resultArea1"),
+                "area2": get_str("resultArea2")
             })
-            print("抓取: {} {}期 {}".format(name, issue_no, issue_day))
-
     except Exception as e:
         print("一起彩抓取失败: {}".format(e))
 
-    # 双色球用官网补充（更准确）
+    # 双色球用官网补充
     try:
         api_r = requests.get(
             "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice?name=ssq&issueCount=1",
@@ -174,7 +189,6 @@ def fetch_lottery():
             "area1": d["red"],
             "area2": d["blue"]
         })
-        print("双色球官网更新成功")
     except Exception as e:
         print("双色球官网失败: {}".format(e))
 
@@ -193,11 +207,9 @@ def format_message(lotteries):
     has_data = False
 
     for name in order:
-        if name not in lmap:
+        if name not in lmap or not lmap[name]["area1"]:
             continue
         item = lmap[name]
-        if not item["area1"]:
-            continue
         icon = icons.get(name, "🎯")
         msg += "\n{} {}\n".format(icon, name)
         if item["issue"]:
@@ -220,52 +232,27 @@ def format_message(lotteries):
     msg += "⚠️ 仅供参考，理性购彩"
     return msg
 
-# ========== 群发推送 ==========
-def broadcast(message):
-    token = get_access_token()
-    if not token:
-        print("无法获取token，推送取消")
-        return False
-    url = "https://api.weixin.qq.com/cgi-bin/message/mass/sendall?access_token={}".format(token)
-    payload = {
-        "filter": {"is_to_all": True},
-        "text": {"content": message},
-        "msgtype": "text"
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=15)
-        result = r.json()
-        print("群发结果: {}".format(result))
-        return result.get("errcode") == 0
-    except Exception as e:
-        print("群发异常: {}".format(e))
-        return False
-
-# ========== 定时任务 ==========
+# ========== 定时推送（每天23:10）==========
 def scheduled_push():
-    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    print("[{}] 开始定时推送...".format(now_str))
+    print("[{}] 开始定时推送...".format(datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")))
     data = fetch_lottery()
     msg = format_message(data)
-    print("推送内容:\n{}".format(msg))
-    broadcast(msg)
+    token = get_access_token()
+    if not token:
+        return
+    url = "https://api.weixin.qq.com/cgi-bin/message/mass/sendall?access_token={}".format(token)
+    payload = {"filter": {"is_to_all": True}, "text": {"content": msg}, "msgtype": "text"}
+    try:
+        r = requests.post(url, json=payload, timeout=15)
+        print("群发结果: {}".format(r.json()))
+    except Exception as e:
+        print("群发失败: {}".format(e))
 
 scheduler = BackgroundScheduler(timezone=TZ)
 scheduler.add_job(scheduled_push, "cron", hour=PUSH_HOUR, minute=PUSH_MINUTE)
 scheduler.start()
 
 # ========== 路由 ==========
-@app.route("/push-now")
-def push_now():
-    if request.args.get("secret") != "push123":
-        return "无权限", 403
-    data = fetch_lottery()
-    msg = format_message(data)
-    broadcast(msg)
-    resp = make_response("<pre style='font-size:14px'>{}</pre>".format(msg))
-    resp.headers["Content-Type"] = "text/html; charset=utf-8"
-    return resp
-
 @app.route("/preview")
 def preview():
     data = fetch_lottery()
@@ -283,5 +270,4 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print("服务启动，端口: {}".format(port))
-    print("定时推送: 每天 {:02d}:{:02d} 北京时间".format(PUSH_HOUR, PUSH_MINUTE))
     app.run(host="0.0.0.0", port=port)
