@@ -37,68 +37,7 @@ def wx_entry():
         if sha1 == signature:
             return echostr
         return "验证失败", 403
-
-    # 处理粉丝发来的消息
-    try:
-        import xml.etree.ElementTree as ET
-        xml_data = ET.fromstring(request.data)
-        msg_type = xml_data.find("MsgType").text
-        from_user = xml_data.find("FromUserName").text
-        to_user = xml_data.find("ToUserName").text
-
-        if msg_type == "text":
-            content = xml_data.find("Content").text.strip()
-            reply = handle_message(content)
-            return make_xml_reply(from_user, to_user, reply)
-    except Exception as e:
-        print("消息处理失败: {}".format(e))
     return "ok"
-
-def handle_message(content):
-    """处理粉丝消息，返回回复内容"""
-    data = fetch_lottery()
-    lmap = {x["name"]: x for x in data}
-
-    if any(k in content for k in ["开奖", "今日", "结果", "号码", "彩票"]):
-        return format_message(data)
-    elif "双色球" in content:
-        item = lmap.get("双色球")
-        if item:
-            return "🔴 双色球 {}期\n开奖：{}\n红球：{}  蓝球：{}\n\n📊 走势图：https://t.yiqicai.com/home/nation".format(
-                item["issue"], item["date"], item["area1"], item["area2"])
-    elif "大乐透" in content:
-        item = lmap.get("大乐透")
-        if item:
-            return "🟡 大乐透 {}期\n开奖：{}\n前区：{}  后区：{}\n\n📊 走势图：https://t.yiqicai.com/home/nation".format(
-                item["issue"], item["date"], item["area1"], item["area2"])
-    elif "七星彩" in content:
-        item = lmap.get("七星彩")
-        if item:
-            return "🔵 七星彩 {}期\n开奖：{}\n号码：{}\n\n📊 走势图：https://t.yiqicai.com/home/nation".format(
-                item["issue"], item["date"], item["area1"])
-    elif "排列五" in content:
-        item = lmap.get("排列五")
-        if item:
-            return "🟢 排列五 {}期\n开奖：{}\n号码：{}\n\n📊 走势图：https://t.yiqicai.com/home/nation".format(
-                item["issue"], item["date"], item["area1"])
-    elif "排列三" in content:
-        item = lmap.get("排列三")
-        if item:
-            return "🟠 排列三 {}期\n开奖：{}\n号码：{}\n\n📊 走势图：https://t.yiqicai.com/home/nation".format(
-                item["issue"], item["date"], item["area1"])
-
-    return "您好！发送以下关键词查询开奖结果：\n\n【开奖】查看今日全部开奖\n【双色球】查看双色球\n【大乐透】查看大乐透\n【七星彩】查看七星彩\n【排列五】查看排列五\n【排列三】查看排列三\n\n⚠️ 仅供参考，理性购彩"
-
-def make_xml_reply(to_user, from_user, content):
-    """生成XML格式的回复"""
-    import time
-    return """<xml>
-<ToUserName><![CDATA[{to}]]></ToUserName>
-<FromUserName><![CDATA[{frm}]]></FromUserName>
-<CreateTime>{t}</CreateTime>
-<MsgType><![CDATA[text]]></MsgType>
-<Content><![CDATA[{content}]]></Content>
-</xml>""".format(to=to_user, frm=from_user, t=int(time.time()), content=content)
 
 # ========== 获取 access_token ==========
 _token_cache = {"token": "", "expire": 0}
